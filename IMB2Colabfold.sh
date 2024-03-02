@@ -9,4 +9,4 @@
 #SBATCH --gres=gpu:A40:1
 #SBATCH --time=72:00:00
 ##Command(s) to run:
-python runcolabfoldsavio3.py
+python runcolabfold.py
