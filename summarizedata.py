@@ -56,7 +56,7 @@ for subdirectory in os.listdir(parent_dir):
         predicted_tm_score = data['ptm']
         predicted_iptm_score = data['iptm']
         
-        results_df = results_df.append({"Subdirectory": output_dir_path, "pLDDT": avglddt, "iPTM": predicted_iptm_score, "pTM": predicted_tm_score}, ignore_index=True)
+        results_df = results_df.concat({"Subdirectory": output_dir_path, "pLDDT": avglddt, "iPTM": predicted_iptm_score, "pTM": predicted_tm_score}, ignore_index=True)
 
 # Write the results DataFrame to an Excel file
 os.chdir(parent_dir)
