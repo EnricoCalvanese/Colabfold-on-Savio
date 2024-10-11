@@ -10,7 +10,7 @@ import os
 from Bio import SeqIO
 
 
-os.chdir('/global/scratch/users/enricocalvane/IMB2ColabFold/fastas')
+os.chdir('/global/scratch/users/enricocalvane/SIZ1/fastas')
 #assign the name of all fasta files to a single vector
 fastas= [x for x in os.listdir() if x.startswith("AT")]
 
