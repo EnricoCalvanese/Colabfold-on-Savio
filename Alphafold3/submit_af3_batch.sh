@@ -20,7 +20,7 @@ echo "Running on: $SLURMD_NODENAME"
 echo "=========================================="
 
 # Change to working directory
-cd /global/scratch/users/enricocalvane/IMB2_AF3_Analysis/scripts
+cd /global/scratch/users/enricocalvane/IMB2_AF3_Analysis
 
 # Load required modules
 module load bio/alphafold3/3.0.1
@@ -54,6 +54,9 @@ echo "Starting sequential AlphaFold3 predictions..."
 echo "This job will run for up to 72 hours, processing predictions sequentially."
 echo "Progress will be logged to this output file."
 echo ""
+
+# Change to working scripts directory
+cd /global/scratch/users/enricocalvane/IMB2_AF3_Analysis/scripts
 
 # Run the Python script
 python run_alphafold3_batch.py
