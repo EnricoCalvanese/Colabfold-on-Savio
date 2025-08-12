@@ -2,9 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 AlphaFold3 Sequential Batch Runner for IMB2-RBF Multimer Predictions on Savio
-Follows the proven workflow pattern: one Python script runs sequentially through
-multiple predictions within long-running SLURM jobs (up to 72 hours)
-Author: Adapted for Enrico Calvane's workflow preferences
+Simple approach following the proven ColabFold workflow pattern
+Author: Simplified for Enrico Calvane's workflow
 """
 
 import os
@@ -14,190 +13,18 @@ import time
 from pathlib import Path
 import sys
 
-def check_job_status(json_file, outputs_dir):
-    """Check if job is already running, completed, or ready to start"""
-    job_name = json_file.stem
-    output_subdir = outputs_dir / job_name
-    
-    # Create output directory if it doesn't exist
-    output_subdir.mkdir(exist_ok=True)
-    
-    # Check for status markers (similar to colab.done/colab.running)
-    if (output_subdir / "af3.done").exists():
-        return "completed"
-    elif (output_subdir / "af3.running").exists():
-        return "running"
-    else:
-        return "ready"
-
-def try_claim_job(json_file, outputs_dir):
-    """
-    Atomically try to claim a job by creating the running marker.
-    Returns True if successfully claimed, False if already claimed by another process.
-    """
-    job_name = json_file.stem
-    output_subdir = outputs_dir / job_name
-    output_subdir.mkdir(exist_ok=True)
-    
-    running_marker = output_subdir / "af3.running"
-    
-    # Check if already completed or running
-    if (output_subdir / "af3.done").exists():
-        return False  # Already completed
-    
-    if running_marker.exists():
-        return False  # Already running
-    
-    # Try to atomically create the running marker
-    try:
-        # Use os.open with O_CREAT | O_EXCL for atomic file creation
-        # This will fail if the file already exists (created by another process)
-        fd = os.open(str(running_marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        with os.fdopen(fd, 'w') as f:
-            f.write(f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}\\n")
-            f.write(f"Process ID: {os.getpid()}\\n")
-            f.write(f"Job ID: {os.environ.get('SLURM_JOB_ID', 'unknown')}\\n")
-        return True  # Successfully claimed
-    except FileExistsError:
-        # Another process already claimed this job
-        return False
-
-def run_single_prediction(json_file, outputs_dir, model_params_dir):
-    """Run a single AlphaFold3 prediction - assumes job is already claimed"""
-    job_name = json_file.stem
-    output_subdir = outputs_dir / job_name
-    
-    print(f"\\n{'='*60}")
-    print(f"Starting prediction: {job_name}")
-    print(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Process ID: {os.getpid()}")
-    print(f"SLURM Job ID: {os.environ.get('SLURM_JOB_ID', 'unknown')}")
-    print(f"{'='*60}")
-    
-    running_marker = output_subdir / "af3.running"
-    
-    try:
-        # Create temporary directories for this prediction
-        temp_input_dir = f"/tmp/af_input_{job_name}_{os.getpid()}"
-        temp_output_dir = f"/tmp/af_output_{job_name}_{os.getpid()}"
-        
-        os.makedirs(temp_input_dir, exist_ok=True)
-        os.makedirs(temp_output_dir, exist_ok=True)
-        
-        # Copy JSON input to temporary directory with required name
-        temp_json = os.path.join(temp_input_dir, "fold_input.json")
-        subprocess.run(['cp', str(json_file), temp_json], check=True)
-        
-        # Construct AlphaFold3 command
-        af3_command = [
-            'apptainer', 'exec', '--nv',
-            '--bind', f'{temp_input_dir}:/root/af_input',
-            '--bind', f'{temp_output_dir}:/root/af_output', 
-            '--bind', f'{model_params_dir}:/root/models',
-            '--bind', f'{os.environ["DB_DIR"]}:/root/public_databases',
-            os.environ['ALPHAFOLD_DIR'] + '/alphafold3.sif',
-            'python', '/app/alphafold/run_alphafold.py',
-            '--json_path=/root/af_input/fold_input.json',
-            '--model_dir=/root/models',
-            '--db_dir=/root/public_databases',
-            '--output_dir=/root/af_output'
-        ]
-        
-        print(f"Running AlphaFold3 command...")
-        print(f"Input: {json_file}")
-        print(f"Output: {output_subdir}")
-        
-        # Run AlphaFold3
-        start_time = time.time()
-        result = subprocess.run(af3_command, 
-                              capture_output=True, 
-                              text=True, 
-                              timeout=14400)  # 4 hour timeout per prediction
-        
-        end_time = time.time()
-        duration = end_time - start_time
-        
-        if result.returncode == 0:
-            # Success - copy results back
-            print(f"✓ AlphaFold3 completed successfully in {duration:.1f} seconds")
-            
-            # Copy all results from temporary to permanent location
-            subprocess.run(['cp', '-r', f'{temp_output_dir}/.', str(output_subdir)], check=True)
-            
-            # Create completion marker and remove running marker
-            with open(output_subdir / "af3.done", 'w') as f:
-                f.write(f"Completed at: {time.strftime('%Y-%m-%d %H:%M:%S')}\\n")
-                f.write(f"Duration: {duration:.1f} seconds\\n")
-                f.write(f"Process ID: {os.getpid()}\\n")
-                f.write(f"Job ID: {os.environ.get('SLURM_JOB_ID', 'unknown')}\\n")
-            
-            running_marker.unlink(missing_ok=True)
-            
-            # Log success
-            print(f"✓ Results saved to: {output_subdir}")
-            
-            return True
-            
-        else:
-            # Failure
-            print(f"✗ AlphaFold3 failed with return code: {result.returncode}")
-            print("STDOUT:")
-            print(result.stdout)
-            print("STDERR:")
-            print(result.stderr)
-            
-            # Save error information
-            with open(output_subdir / "af3.error", 'w') as f:
-                f.write(f"Failed at: {time.strftime('%Y-%m-%d %H:%M:%S')}\\n")
-                f.write(f"Return code: {result.returncode}\\n")
-                f.write(f"Duration: {duration:.1f} seconds\\n")
-                f.write(f"Process ID: {os.getpid()}\\n")
-                f.write(f"Job ID: {os.environ.get('SLURM_JOB_ID', 'unknown')}\\n")
-                f.write("\\nSTDOUT:\\n")
-                f.write(result.stdout)
-                f.write("\\nSTDERR:\\n")
-                f.write(result.stderr)
-            
-            running_marker.unlink(missing_ok=True)
-            
-            return False
-            
-    except subprocess.TimeoutExpired:
-        print(f"✗ AlphaFold3 timed out after 4 hours")
-        with open(output_subdir / "af3.timeout", 'w') as f:
-            f.write(f"Timed out at: {time.strftime('%Y-%m-%d %H:%M:%S')}\\n")
-            f.write(f"Process ID: {os.getpid()}\\n")
-            f.write(f"Job ID: {os.environ.get('SLURM_JOB_ID', 'unknown')}\\n")
-        running_marker.unlink(missing_ok=True)
-        return False
-        
-    except Exception as e:
-        print(f"✗ Unexpected error: {str(e)}")
-        with open(output_subdir / "af3.error", 'w') as f:
-            f.write(f"Error at: {time.strftime('%Y-%m-%d %H:%M:%S')}\\n")
-            f.write(f"Error: {str(e)}\\n")
-            f.write(f"Process ID: {os.getpid()}\\n")
-            f.write(f"Job ID: {os.environ.get('SLURM_JOB_ID', 'unknown')}\\n")
-        running_marker.unlink(missing_ok=True)
-        return False
-        
-    finally:
-        # Clean up temporary directories
-        subprocess.run(['rm', '-rf', temp_input_dir], check=False)
-        subprocess.run(['rm', '-rf', temp_output_dir], check=False)
-
 def main():
-    """Main sequential prediction loop - runs until wall time or all predictions complete"""
+    """Main sequential prediction loop - simple approach like the original ColabFold script"""
     # Setup paths
     base_dir = Path("/global/scratch/users/enricocalvane/IMB2_AF3_Analysis")
     inputs_dir = base_dir / "inputs"
     outputs_dir = base_dir / "outputs"
     model_params_dir = "/global/home/users/enricocalvane/model_param"
     
-    # Ensure output directory exists
-    outputs_dir.mkdir(exist_ok=True)
+    # Change to the outputs directory (like the original script)
+    os.chdir(outputs_dir)
     
-    # Get all JSON files
+    # Get all JSON files and create corresponding directory names
     json_files = sorted(list(inputs_dir.glob("*.json")))
     
     if not json_files:
@@ -207,86 +34,139 @@ def main():
     print(f"AlphaFold3 Sequential Batch Runner")
     print(f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Found {len(json_files)} JSON files for processing")
-    print(f"Model parameters: {model_params_dir}")
-    print(f"Database directory: {os.environ.get('DB_DIR', 'NOT SET')}")
+    print(f"Working directory: {os.getcwd()}")
+    print(f"Process ID: {os.getpid()}")
+    print(f"SLURM Job ID: {os.environ.get('SLURM_JOB_ID', 'unknown')}")
     
-    # Check initial status
-    completed = 0
-    ready = 0
-    running = 0
+    # Create list of directory names (like the original "fastas" list)
+    job_dirs = [json_file.stem for json_file in json_files]
     
-    for json_file in json_files:
-        status = check_job_status(json_file, outputs_dir)
-        if status == "completed":
-            completed += 1
-        elif status == "ready":
-            ready += 1
-        elif status == "running":
-            running += 1
-    
-    print(f"\\nInitial status: {completed} completed, {ready} ready, {running} running")
-    
-    # Clean up any stale "running" markers (from previous interrupted runs)
-    if running > 0:
-        print(f"Cleaning up {running} stale 'running' markers...")
-        for json_file in json_files:
-            if check_job_status(json_file, outputs_dir) == "running":
-                running_marker = outputs_dir / json_file.stem / "af3.running"
-                running_marker.unlink(missing_ok=True)
-                print(f"  Removed: {running_marker}")
-    
-    # Run predictions sequentially with atomic job claiming
     successful_predictions = 0
     failed_predictions = 0
     skipped_predictions = 0
     
-    for json_file in json_files:
-        # Check if already completed
-        status = check_job_status(json_file, outputs_dir)
-        if status == "completed":
-            print(f"⏭  Skipping {json_file.stem} (already completed)")
-            continue
+    # Main loop - exactly like the original ColabFold script
+    for job_name in job_dirs:
+        # Create job directory if it doesn't exist
+        os.makedirs(job_name, exist_ok=True)
+        os.chdir(job_name)
         
-        # Try to atomically claim this job
-        if not try_claim_job(json_file, outputs_dir):
-            print(f"⏭  Skipping {json_file.stem} (already running or completed by another process)")
-            skipped_predictions += 1
-            continue
+        # Simple check - exactly like the original script
+        if "af3.running" not in os.listdir() and "af3.done" not in os.listdir():
+            print(f"\\n{'='*60}")
+            print(f"Starting prediction: {job_name}")
+            print(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+            print(f"Process ID: {os.getpid()}")
+            print(f"SLURM Job ID: {os.environ.get('SLURM_JOB_ID', 'unknown')}")
+            print(f"{'='*60}")
+            
+            # Create running marker immediately (like original script)
+            with open("af3.running", "w") as o:
+                o.write(f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}\\n")
+                o.write(f"Process ID: {os.getpid()}\\n")
+                o.write(f"Job ID: {os.environ.get('SLURM_JOB_ID', 'unknown')}\\n")
+            
+            # Get the corresponding JSON file
+            json_file = inputs_dir / f"{job_name}.json"
+            
+            # Create temporary directories
+            temp_input_dir = f"/tmp/af_input_{job_name}_{os.getpid()}"
+            temp_output_dir = f"/tmp/af_output_{job_name}_{os.getpid()}"
+            
+            try:
+                os.makedirs(temp_input_dir, exist_ok=True)
+                os.makedirs(temp_output_dir, exist_ok=True)
+                
+                # Copy JSON input to temporary directory with required name
+                temp_json = os.path.join(temp_input_dir, "fold_input.json")
+                subprocess.run(['cp', str(json_file), temp_json], check=True)
+                
+                # Run AlphaFold3 (equivalent to the original os.system call)
+                af3_command = [
+                    'apptainer', 'exec', '--nv',
+                    '--bind', f'{temp_input_dir}:/root/af_input',
+                    '--bind', f'{temp_output_dir}:/root/af_output', 
+                    '--bind', f'{model_params_dir}:/root/models',
+                    '--bind', f'{os.environ["DB_DIR"]}:/root/public_databases',
+                    os.environ['ALPHAFOLD_DIR'] + '/alphafold3.sif',
+                    'python', '/app/alphafold/run_alphafold.py',
+                    '--json_path=/root/af_input/fold_input.json',
+                    '--model_dir=/root/models',
+                    '--db_dir=/root/public_databases',
+                    '--output_dir=/root/af_output'
+                ]
+                
+                print(f"Running AlphaFold3...")
+                start_time = time.time()
+                
+                # Run the command (like os.system in original)
+                result = subprocess.run(af3_command, timeout=14400)  # 4 hour timeout
+                
+                end_time = time.time()
+                duration = end_time - start_time
+                
+                if result.returncode == 0:
+                    # Success - copy results back
+                    print(f"✓ AlphaFold3 completed successfully in {duration:.1f} seconds")
+                    subprocess.run(['cp', '-r', f'{temp_output_dir}/.', '.'], check=True)
+                    successful_predictions += 1
+                else:
+                    print(f"✗ AlphaFold3 failed with return code: {result.returncode}")
+                    failed_predictions += 1
+                
+                # Create done marker (like original script)
+                with open("af3.done", "w") as o:
+                    o.write(f"Completed at: {time.strftime('%Y-%m-%d %H:%M:%S')}\\n")
+                    o.write(f"Duration: {duration:.1f} seconds\\n")
+                    o.write(f"Success: {result.returncode == 0}\\n")
+                
+                print(f"✓ Finished: {job_name}")
+                
+            except subprocess.TimeoutExpired:
+                print(f"✗ AlphaFold3 timed out after 4 hours")
+                with open("af3.timeout", "w") as o:
+                    o.write(f"Timed out at: {time.strftime('%Y-%m-%d %H:%M:%S')}\\n")
+                failed_predictions += 1
+                
+            except Exception as e:
+                print(f"✗ Error: {str(e)}")
+                with open("af3.error", "w") as o:
+                    o.write(f"Error at: {time.strftime('%Y-%m-%d %H:%M:%S')}\\n")
+                    o.write(f"Error: {str(e)}\\n")
+                failed_predictions += 1
+                
+            finally:
+                # Clean up temporary directories
+                subprocess.run(['rm', '-rf', temp_input_dir], check=False)
+                subprocess.run(['rm', '-rf', temp_output_dir], check=False)
         
-        # Successfully claimed - run the prediction
-        print(f"🔒 Claimed job: {json_file.stem}")
-        success = run_single_prediction(json_file, outputs_dir, model_params_dir)
-        
-        if success:
-            successful_predictions += 1
-            print(f"✓ Completed prediction {successful_predictions}")
         else:
-            failed_predictions += 1
-            print(f"✗ Failed prediction {failed_predictions}")
+            # Skip this job (like original script)
+            if "af3.done" in os.listdir():
+                print(f"⏭  Skipping {job_name} (already completed)")
+            elif "af3.running" in os.listdir():
+                print(f"⏭  Skipping {job_name} (already running)")
+            skipped_predictions += 1
         
-        # Quick status update
-        remaining = sum(1 for jf in json_files if check_job_status(jf, outputs_dir) == "ready")
-        print(f"Status: {successful_predictions} successful, {failed_predictions} failed, {skipped_predictions} skipped, {remaining} remaining")
+        # Go back to outputs directory for next iteration
+        os.chdir("..")
+        
+        # Show progress
+        remaining = len(job_dirs) - successful_predictions - failed_predictions - skipped_predictions
+        print(f"Progress: {successful_predictions} successful, {failed_predictions} failed, {skipped_predictions} skipped, {remaining} remaining")
     
     # Final summary
     print(f"\\n{'='*60}")
     print(f"Batch run completed at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Successful predictions this run: {successful_predictions}")
-    print(f"Failed predictions this run: {failed_predictions}")
-    print(f"Skipped predictions this run: {skipped_predictions}")
+    print(f"Successful predictions: {successful_predictions}")
+    print(f"Failed predictions: {failed_predictions}")
+    print(f"Skipped predictions: {skipped_predictions}")
+    print(f"Total processed: {len(job_dirs)}")
     
-    # Overall status
-    final_completed = sum(1 for jf in json_files if check_job_status(jf, outputs_dir) == "completed")
-    final_remaining = len(json_files) - final_completed
-    
-    print(f"Overall status: {final_completed}/{len(json_files)} completed, {final_remaining} remaining")
-    
-    if final_remaining == 0:
+    if successful_predictions + skipped_predictions == len(job_dirs):
         print("🎉 All predictions completed!")
     else:
-        print(f"To continue with remaining predictions, resubmit this job.")
-        print(f"Failed predictions can be restarted by removing error/timeout files:")
-        print(f"  find {outputs_dir} -name 'af3.error' -o -name 'af3.timeout' | xargs rm")
+        print(f"To retry failed predictions, remove error/timeout files and resubmit.")
 
 if __name__ == "__main__":
     main()
