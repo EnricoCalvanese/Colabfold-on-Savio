@@ -30,21 +30,51 @@ def check_job_status(json_file, outputs_dir):
     else:
         return "ready"
 
-def run_single_prediction(json_file, outputs_dir, model_params_dir):
-    """Run a single AlphaFold3 prediction"""
+def try_claim_job(json_file, outputs_dir):
+    """
+    Atomically try to claim a job by creating the running marker.
+    Returns True if successfully claimed, False if already claimed by another process.
+    """
     job_name = json_file.stem
     output_subdir = outputs_dir / job_name
     output_subdir.mkdir(exist_ok=True)
     
+    running_marker = output_subdir / "af3.running"
+    
+    # Check if already completed or running
+    if (output_subdir / "af3.done").exists():
+        return False  # Already completed
+    
+    if running_marker.exists():
+        return False  # Already running
+    
+    # Try to atomically create the running marker
+    try:
+        # Use os.open with O_CREAT | O_EXCL for atomic file creation
+        # This will fail if the file already exists (created by another process)
+        fd = os.open(str(running_marker), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        with os.fdopen(fd, 'w') as f:
+            f.write(f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}\\n")
+            f.write(f"Process ID: {os.getpid()}\\n")
+            f.write(f"Job ID: {os.environ.get('SLURM_JOB_ID', 'unknown')}\\n")
+        return True  # Successfully claimed
+    except FileExistsError:
+        # Another process already claimed this job
+        return False
+
+def run_single_prediction(json_file, outputs_dir, model_params_dir):
+    """Run a single AlphaFold3 prediction - assumes job is already claimed"""
+    job_name = json_file.stem
+    output_subdir = outputs_dir / job_name
+    
     print(f"\\n{'='*60}")
     print(f"Starting prediction: {job_name}")
     print(f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"Process ID: {os.getpid()}")
+    print(f"SLURM Job ID: {os.environ.get('SLURM_JOB_ID', 'unknown')}")
     print(f"{'='*60}")
     
-    # Create running marker
     running_marker = output_subdir / "af3.running"
-    with open(running_marker, 'w') as f:
-        f.write(f"Started at: {time.strftime('%Y-%m-%d %H:%M:%S')}\\n")
     
     try:
         # Create temporary directories for this prediction
@@ -98,6 +128,8 @@ def run_single_prediction(json_file, outputs_dir, model_params_dir):
             with open(output_subdir / "af3.done", 'w') as f:
                 f.write(f"Completed at: {time.strftime('%Y-%m-%d %H:%M:%S')}\\n")
                 f.write(f"Duration: {duration:.1f} seconds\\n")
+                f.write(f"Process ID: {os.getpid()}\\n")
+                f.write(f"Job ID: {os.environ.get('SLURM_JOB_ID', 'unknown')}\\n")
             
             running_marker.unlink(missing_ok=True)
             
@@ -119,6 +151,8 @@ def run_single_prediction(json_file, outputs_dir, model_params_dir):
                 f.write(f"Failed at: {time.strftime('%Y-%m-%d %H:%M:%S')}\\n")
                 f.write(f"Return code: {result.returncode}\\n")
                 f.write(f"Duration: {duration:.1f} seconds\\n")
+                f.write(f"Process ID: {os.getpid()}\\n")
+                f.write(f"Job ID: {os.environ.get('SLURM_JOB_ID', 'unknown')}\\n")
                 f.write("\\nSTDOUT:\\n")
                 f.write(result.stdout)
                 f.write("\\nSTDERR:\\n")
@@ -132,6 +166,8 @@ def run_single_prediction(json_file, outputs_dir, model_params_dir):
         print(f"✗ AlphaFold3 timed out after 4 hours")
         with open(output_subdir / "af3.timeout", 'w') as f:
             f.write(f"Timed out at: {time.strftime('%Y-%m-%d %H:%M:%S')}\\n")
+            f.write(f"Process ID: {os.getpid()}\\n")
+            f.write(f"Job ID: {os.environ.get('SLURM_JOB_ID', 'unknown')}\\n")
         running_marker.unlink(missing_ok=True)
         return False
         
@@ -140,6 +176,8 @@ def run_single_prediction(json_file, outputs_dir, model_params_dir):
         with open(output_subdir / "af3.error", 'w') as f:
             f.write(f"Error at: {time.strftime('%Y-%m-%d %H:%M:%S')}\\n")
             f.write(f"Error: {str(e)}\\n")
+            f.write(f"Process ID: {os.getpid()}\\n")
+            f.write(f"Job ID: {os.environ.get('SLURM_JOB_ID', 'unknown')}\\n")
         running_marker.unlink(missing_ok=True)
         return False
         
@@ -197,21 +235,26 @@ def main():
                 running_marker.unlink(missing_ok=True)
                 print(f"  Removed: {running_marker}")
     
-    # Run predictions sequentially
+    # Run predictions sequentially with atomic job claiming
     successful_predictions = 0
     failed_predictions = 0
+    skipped_predictions = 0
     
     for json_file in json_files:
+        # Check if already completed
         status = check_job_status(json_file, outputs_dir)
-        
         if status == "completed":
             print(f"⏭  Skipping {json_file.stem} (already completed)")
             continue
-        elif status == "running":
-            print(f"⏭  Skipping {json_file.stem} (running - this shouldn't happen after cleanup)")
+        
+        # Try to atomically claim this job
+        if not try_claim_job(json_file, outputs_dir):
+            print(f"⏭  Skipping {json_file.stem} (already running or completed by another process)")
+            skipped_predictions += 1
             continue
         
-        # Run the prediction
+        # Successfully claimed - run the prediction
+        print(f"🔒 Claimed job: {json_file.stem}")
         success = run_single_prediction(json_file, outputs_dir, model_params_dir)
         
         if success:
@@ -223,13 +266,14 @@ def main():
         
         # Quick status update
         remaining = sum(1 for jf in json_files if check_job_status(jf, outputs_dir) == "ready")
-        print(f"Status: {successful_predictions} successful, {failed_predictions} failed, {remaining} remaining")
+        print(f"Status: {successful_predictions} successful, {failed_predictions} failed, {skipped_predictions} skipped, {remaining} remaining")
     
     # Final summary
     print(f"\\n{'='*60}")
     print(f"Batch run completed at: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Successful predictions this run: {successful_predictions}")
     print(f"Failed predictions this run: {failed_predictions}")
+    print(f"Skipped predictions this run: {skipped_predictions}")
     
     # Overall status
     final_completed = sum(1 for jf in json_files if check_job_status(jf, outputs_dir) == "completed")
