@@ -121,9 +121,9 @@ case "${1:-status}" in
     "submit")
         echo ""
         echo "Submitting new batch job..."
-        
-        # First cleanup any stale running markers
-        find "$OUTPUTS_DIR" -name "af3.running" -delete 2>/dev/null
+
+        #Change to scripts directory 
+        cd "$ANALYSIS_DIR/scripts"
         
         # Submit the job
         sbatch submit_af3_batch.sh
@@ -145,7 +145,7 @@ case "${1:-status}" in
         echo "  cleanup     Remove stale 'running' markers only"
         echo "  reset-failed Reset failed predictions for retry"
         echo "  clean-all   Reset all non-completed predictions (interactive)"
-        echo "  submit      Clean running markers and submit new batch job"
+        echo "  submit      Submit new batch job"
         echo "  help        Show this help message"
         echo ""
         echo "Examples:"
