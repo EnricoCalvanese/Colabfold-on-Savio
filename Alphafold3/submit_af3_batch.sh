@@ -20,7 +20,7 @@ echo "Running on: $SLURMD_NODENAME"
 echo "=========================================="
 
 # Change to working directory
-cd /global/scratch/users/enricocalvane/IMB2_AF3_Analysis
+cd /global/scratch/users/enricocalvane/IMB2_AF3_Analysis/scripts
 
 # Load required modules
 module load bio/alphafold3/3.0.1
