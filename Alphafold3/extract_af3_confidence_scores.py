@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AlphaFold3 Confidence Score Extractor - Simplified Version
+AlphaFold3 Confidence Score Extractor - Fixed Version
 Extracts pLDDT, pTM, and ipTM scores from summary_confidences.json files
-Author: Simplified for Enrico Calvane's analysis
+Author: Fixed for Enrico Calvane's analysis
 """
 
 import os
@@ -47,12 +47,38 @@ def extract_confidence_scores(output_dir):
         results['status'] = 'not_started'
         return results
     
-    # Extract scores from summary_confidences.json (the authoritative source)
-    summary_file = output_dir / "summary_confidences.json"
+    # Find the actual summary file - it's in a subdirectory with lowercase name
+    # Pattern: AT2G16950_AT1G02870.1/at2g16950_at1g02870.1/at2g16950_at1g02870.1_summary_confidences.json
     
-    if not summary_file.exists():
+    # Look for subdirectories that match the lowercase version of the parent directory name
+    prediction_name_lower = output_dir.name.lower()
+    subdirs = [d for d in output_dir.iterdir() if d.is_dir() and d.name == prediction_name_lower]
+    
+    summary_file = None
+    
+    if subdirs:
+        # Found the expected subdirectory
+        subdir = subdirs[0]
+        expected_summary_file = subdir / f"{prediction_name_lower}_summary_confidences.json"
+        
+        if expected_summary_file.exists():
+            summary_file = expected_summary_file
+        else:
+            # Fallback: look for any file ending with _summary_confidences.json
+            summary_files = list(subdir.glob("*_summary_confidences.json"))
+            if summary_files:
+                summary_file = summary_files[0]
+    
+    # If no subdirectory approach worked, try a broader search
+    if summary_file is None:
+        # Search recursively for any summary_confidences.json file
+        summary_files = list(output_dir.rglob("*summary_confidences.json"))
+        if summary_files:
+            summary_file = summary_files[0]
+    
+    if summary_file is None:
         results['status'] = 'missing_summary'
-        results['error_message'] = 'summary_confidences.json not found'
+        results['error_message'] = f'No summary_confidences.json found in {output_dir.name} or its subdirectories'
         return results
     
     try:
@@ -67,11 +93,11 @@ def extract_confidence_scores(output_dir):
         
         # Verify we got the essential scores
         if results['mean_plddt'] is None:
-            results['error_message'] = 'No confidence_score in summary file'
+            results['error_message'] = f'No confidence_score in summary file: {summary_file.name}'
             
     except Exception as e:
         results['status'] = 'parsing_error'
-        results['error_message'] = f"Error parsing summary_confidences.json: {str(e)}"
+        results['error_message'] = f"Error parsing {summary_file.name}: {str(e)}"
     
     return results
 
@@ -131,7 +157,7 @@ def main():
     outputs_dir = base_dir / "outputs"
     inputs_dir = base_dir / "inputs"
     
-    print(f"AlphaFold3 Confidence Score Extractor (Simplified)")
+    print(f"AlphaFold3 Confidence Score Extractor (Fixed Version)")
     print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     print(f"Using summary_confidences.json as authoritative source")
     print("="*60)
@@ -273,13 +299,13 @@ def main():
         print(f"Average pTM: {completed_df['ptm_score'].mean():.3f}")  
         print(f"Average ipTM: {completed_df['iptm_score'].mean():.3f}")
         
-        print("\\nTop 5 predictions by pLDDT:")
+        print("\nTop 5 predictions by pLDDT:")
         top_5 = completed_df.head(5)
         for _, row in top_5.iterrows():
             print(f"  {row['interaction']:40} pLDDT: {row['mean_plddt']:.1f}, "
                   f"pTM: {row['ptm_score']:.3f}, ipTM: {row['iptm_score']:.3f}")
     
-    print(f"\\n✓ Results saved to: {excel_file}")
+    print(f"\n✓ Results saved to: {excel_file}")
     print(f"Finished at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
 if __name__ == "__main__":
