@@ -20,9 +20,11 @@ def extract_confidence_scores(output_dir):
     results = {
         'prediction_name': output_dir.name,
         'status': 'unknown',
-        'mean_plddt': None,
+        'mean_plddt': None,  # Will store ranking_score from AF3
         'ptm_score': None,
         'iptm_score': None,
+        'fraction_disordered': None,
+        'has_clash': None,
         'error_message': None
     }
     
@@ -86,14 +88,18 @@ def extract_confidence_scores(output_dir):
             summary_data = json.load(f)
         
         # Extract the main confidence scores
-        # These are the final scores for the top-ranked model
-        results['mean_plddt'] = summary_data.get('confidence_score')
+        # AlphaFold3 uses ranking_score as the main confidence metric
+        results['mean_plddt'] = summary_data.get('ranking_score')  # This is the main confidence score in AF3
         results['ptm_score'] = summary_data.get('ptm')  
         results['iptm_score'] = summary_data.get('iptm')
         
+        # Also extract additional metrics available in AF3
+        results['fraction_disordered'] = summary_data.get('fraction_disordered')
+        results['has_clash'] = summary_data.get('has_clash')
+        
         # Verify we got the essential scores
         if results['mean_plddt'] is None:
-            results['error_message'] = f'No confidence_score in summary file: {summary_file.name}'
+            results['error_message'] = f'No ranking_score in summary file: {summary_file.name}'
             
     except Exception as e:
         results['status'] = 'parsing_error'
@@ -134,21 +140,24 @@ def parse_protein_names(prediction_name):
     
     return prediction_name, 'unknown'
 
-def assign_confidence_category(plddt):
+def assign_confidence_category(ranking_score):
     """
-    Assign confidence category based on pLDDT score
-    Standard AlphaFold confidence levels
+    Assign confidence category based on ranking score
+    AlphaFold3 uses ranking_score instead of mean pLDDT
+    Note: These thresholds may need adjustment based on AF3 specific ranges
     """
-    if plddt is None:
+    if ranking_score is None:
         return 'Unknown'
-    elif plddt >= 90:
-        return 'Very High (>90)'
-    elif plddt >= 70:
-        return 'High (70-90)'
-    elif plddt >= 50:
-        return 'Low (50-70)'
+    elif ranking_score >= 0.8:
+        return 'Very High (≥0.8)'
+    elif ranking_score >= 0.6:
+        return 'High (0.6-0.8)'
+    elif ranking_score >= 0.4:
+        return 'Medium (0.4-0.6)'
+    elif ranking_score >= 0.2:
+        return 'Low (0.2-0.4)'
     else:
-        return 'Very Low (<50)'
+        return 'Very Low (<0.2)'
 
 def main():
     """Extract confidence scores and create Excel file"""
@@ -159,7 +168,7 @@ def main():
     
     print(f"AlphaFold3 Confidence Score Extractor (Fixed Version)")
     print(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print(f"Using summary_confidences.json as authoritative source")
+    print(f"Using ranking_score from summary_confidences.json as main confidence metric")
     print("="*60)
     
     # Get all output directories
@@ -206,9 +215,15 @@ def main():
             ptm = results['ptm_score']
             iptm = results['iptm_score']
             category = results['confidence_category']
-            print(f"  ✓ pLDDT: {plddt:.1f if plddt else 'N/A'} ({category}), "
-                  f"pTM: {ptm:.3f if ptm else 'N/A'}, "
-                  f"ipTM: {iptm:.3f if iptm else 'N/A'}")
+            
+            # Safe formatting to avoid None type errors
+            plddt_str = f"{plddt:.3f}" if plddt is not None else 'N/A'
+            ptm_str = f"{ptm:.3f}" if ptm is not None else 'N/A'
+            iptm_str = f"{iptm:.3f}" if iptm is not None else 'N/A'
+            
+            print(f"  ✓ Ranking Score: {plddt_str} ({category}), "
+                  f"pTM: {ptm_str}, "
+                  f"ipTM: {iptm_str}")
         else:
             print(f"  ✗ Status: {results['status']}")
             if results['error_message']:
@@ -223,6 +238,7 @@ def main():
         'prediction_name', 'IMB2_protein', 'RBF_protein', 'interaction',
         'status', 'confidence_category',
         'mean_plddt', 'ptm_score', 'iptm_score',
+        'fraction_disordered', 'has_clash',
         'IMB2_length', 'RBF_length', 'total_residues',
         'error_message'
     ]
@@ -245,9 +261,9 @@ def main():
         if not completed_df.empty:
             completed_df.to_excel(writer, sheet_name='Completed', index=False)
         
-        # High confidence predictions (pLDDT >= 70)
+        # High confidence predictions (ranking_score >= 0.6)
         if not completed_df.empty:
-            high_conf_df = completed_df[completed_df['mean_plddt'] >= 70]
+            high_conf_df = completed_df[completed_df['mean_plddt'] >= 0.6]
             if not high_conf_df.empty:
                 high_conf_df.to_excel(writer, sheet_name='High_Confidence', index=False)
         
@@ -258,24 +274,24 @@ def main():
                     'Total Predictions',
                     'Completed Successfully', 
                     'Failed/Timeout/Error',
-                    'High Confidence (pLDDT ≥ 70)',
-                    'Very High Confidence (pLDDT ≥ 90)',
-                    'Mean pLDDT (all completed)',
+                    'High Confidence (Ranking ≥ 0.6)',
+                    'Very High Confidence (Ranking ≥ 0.8)',
+                    'Mean Ranking Score (all completed)',
                     'Mean pTM (all completed)', 
                     'Mean ipTM (all completed)',
-                    'Best pLDDT Score',
-                    'Best Interaction (by pLDDT)'
+                    'Best Ranking Score',
+                    'Best Interaction (by Ranking Score)'
                 ],
                 'Value': [
                     len(df),
                     len(completed_df),
                     len(df) - len(completed_df),
-                    len(completed_df[completed_df['mean_plddt'] >= 70]) if not completed_df.empty else 0,
-                    len(completed_df[completed_df['mean_plddt'] >= 90]) if not completed_df.empty else 0,
-                    f"{completed_df['mean_plddt'].mean():.2f}" if not completed_df.empty else 'N/A',
+                    len(completed_df[completed_df['mean_plddt'] >= 0.6]) if not completed_df.empty else 0,
+                    len(completed_df[completed_df['mean_plddt'] >= 0.8]) if not completed_df.empty else 0,
+                    f"{completed_df['mean_plddt'].mean():.3f}" if not completed_df.empty else 'N/A',
                     f"{completed_df['ptm_score'].mean():.3f}" if not completed_df.empty else 'N/A',
                     f"{completed_df['iptm_score'].mean():.3f}" if not completed_df.empty else 'N/A',
-                    f"{completed_df['mean_plddt'].max():.2f}" if not completed_df.empty else 'N/A',
+                    f"{completed_df['mean_plddt'].max():.3f}" if not completed_df.empty else 'N/A',
                     completed_df.iloc[0]['interaction'] if not completed_df.empty else 'N/A'
                 ]
             }
@@ -290,20 +306,28 @@ def main():
     print(f"Failed/timeout/error: {len(df) - len(completed_df)}")
     
     if not completed_df.empty:
-        high_conf = completed_df[completed_df['mean_plddt'] >= 70]
-        very_high_conf = completed_df[completed_df['mean_plddt'] >= 90]
+        high_conf = completed_df[completed_df['mean_plddt'] >= 0.6]
+        very_high_conf = completed_df[completed_df['mean_plddt'] >= 0.8]
         
-        print(f"High confidence (pLDDT ≥ 70): {len(high_conf)}")
-        print(f"Very high confidence (pLDDT ≥ 90): {len(very_high_conf)}")
-        print(f"Average pLDDT: {completed_df['mean_plddt'].mean():.2f}")
+        print(f"High confidence (Ranking ≥ 0.6): {len(high_conf)}")
+        print(f"Very high confidence (Ranking ≥ 0.8): {len(very_high_conf)}")
+        print(f"Average Ranking Score: {completed_df['mean_plddt'].mean():.3f}")
         print(f"Average pTM: {completed_df['ptm_score'].mean():.3f}")  
         print(f"Average ipTM: {completed_df['iptm_score'].mean():.3f}")
         
-        print("\nTop 5 predictions by pLDDT:")
+        print("\nTop 5 predictions by Ranking Score:")
         top_5 = completed_df.head(5)
         for _, row in top_5.iterrows():
-            print(f"  {row['interaction']:40} pLDDT: {row['mean_plddt']:.1f}, "
-                  f"pTM: {row['ptm_score']:.3f}, ipTM: {row['iptm_score']:.3f}")
+            ranking_score = row['mean_plddt']
+            ptm = row['ptm_score'] 
+            iptm = row['iptm_score']
+            
+            ranking_str = f"{ranking_score:.3f}" if ranking_score is not None else 'N/A'
+            ptm_str = f"{ptm:.3f}" if ptm is not None else 'N/A'
+            iptm_str = f"{iptm:.3f}" if iptm is not None else 'N/A'
+            
+            print(f"  {row['interaction']:40} Ranking: {ranking_str}, "
+                  f"pTM: {ptm_str}, ipTM: {iptm_str}")
     
     print(f"\n✓ Results saved to: {excel_file}")
     print(f"Finished at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
